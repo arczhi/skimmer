@@ -37,7 +37,7 @@ def main() -> int:
         print("WARNINGS (usually fine):")
         for c in warns:
             print(f"  - {c.name}: {c.detail}")
-    print("ALL CHECKS PASSED - start with: run_windows.bat  (or READER_BACKEND=onnx python app.py)")
+    print("ALL CHECKS PASSED - start with: run_windows.bat  (or python app.py)")
     return 0
 
 

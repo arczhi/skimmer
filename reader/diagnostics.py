@@ -26,6 +26,16 @@ def reader_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def salience_path() -> Path | None:
+    base = reader_root() / "models_onnx"
+    if base.is_dir():
+        for p in sorted(base.iterdir()):
+            if p.name.startswith("salience_") and (p / "model.int8.onnx").exists():
+                return p / "model.int8.onnx"
+    env = os.environ.get("READER_SALIENCE_PATH")
+    return Path(env) if env else None
+
+
 def onnx_path() -> Path:
     return Path(
         os.environ.get(
@@ -75,21 +85,42 @@ def collect_checks(scorer=None, smoke: bool = True) -> list[Check]:
         try:
             import mlx.core  # noqa: F401
 
-            _add(checks, "mlx（Apple 原生后端）", "ok", "可用")
+            _add(checks, "mlx-lm（Apple MLX 后端）", "ok", "可用")
         except Exception:  # noqa: BLE001
-            _add(checks, "mlx（Apple 原生后端）", "warn", "未安装", "ONNX 后端仍可用；如需原生：pip install mlx mlx-lm")
+            _add(checks, "mlx-lm（Apple MLX 后端）", "warn", "未安装", "ONNX 后端仍可用；如需原生：pip install mlx mlx-lm")
 
-    # onnx model files
-    path = onnx_path()
-    if path.exists():
-        _add(checks, "ONNX 模型文件", "ok", f"{path.name} ({path.stat().st_size/1e6:.0f} MB)")
+        v5 = reader_root() / "models" / "v5_batched_4bit"
+        if v5.exists():
+            safet = v5 / "model.safetensors"
+            _add(checks, "MLX 4-bit 模型", "ok", f"{safet.name} ({safet.stat().st_size/1e6:.0f} MB)")
+            head = reader_root() / "models" / "shared" / "decision_head.safetensors"
+            _add(checks, "  decision_head.safetensors",
+                 "ok" if head.exists() else "fail",
+                 "" if head.exists() else "缺失",
+                 "" if head.exists() else "python download_model.py --mlx4bit")
+        else:
+            _add(checks, "MLX 4-bit 模型", "warn", "未找到 models/v5_batched_4bit/",
+                 "可选（Apple Silicon）：python download_model.py --mlx4bit")
+
+    # model files: whole-document salience model (preferred) + legacy cross-encoder
+    spath = salience_path()
+    if spath is not None and spath.exists():
+        _add(checks, "整篇 salience 模型", "ok",
+             f"{spath.parent.name}/{spath.name} ({spath.stat().st_size/1e6:.0f} MB)")
         for name in ("tokenizer.json", "tokenizer_config.json"):
-            f = path.parent / name
+            f = spath.parent / name
             _add(checks, f"  {name}", "ok" if f.exists() else "fail",
                  "" if f.exists() else "缺失", "" if f.exists() else "重新拷贝模型目录")
     else:
-        _add(checks, "ONNX 模型文件", "warn", f"未找到 {path}",
-             "拷贝 models_onnx/student_salience/（Windows/ONNX 后端需要）")
+        _add(checks, "整篇 salience 模型", "warn", "未找到 models_onnx/salience_*/model.int8.onnx",
+             "python download_model.py（推荐，34 MB，纯 CPU 秒级）；否则回退 cross-encoder")
+
+    path = onnx_path()
+    if path.exists():
+        _add(checks, "ONNX 模型文件（legacy）", "ok", f"{path.name} ({path.stat().st_size/1e6:.0f} MB)")
+    else:
+        _add(checks, "ONNX 模型文件（legacy）", "warn", f"未找到 {path}",
+             "仅在使用 reader/scoring.py 的 onnx 后端时需要")
 
     # active backend + smoke inference
     if scorer is not None:

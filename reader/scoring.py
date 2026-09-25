@@ -1,25 +1,20 @@
-"""Sentence-importance scoring with the decision model (local, MLX).
+"""Sentence-importance scoring backends (all models ship with the release).
 
-A document is split into sentences, grouped into context chunks (the model's
-state window), and each chunk is scored in ONE forward pass per sentence by
-asking: "Which sentence is most important for <goal>?" with all chunk
-sentences as runtime candidates. Scores are then mapped to document-level
-percentiles so chunks are comparable.
+Two scoring strategies:
+
+- `salience`: the document is packed into segments and scored in one batched
+  encoder pass; every sentence gets an absolute importance logit.
+- `onnx` / `batch` / `batch4bit`: the goal-conditioned cross-encoder. A chunk of
+  sentences is scored by asking "Which sentence is most important for <goal>?"
+  with the chunk's sentences as runtime candidates; scores are softmaxed within
+  the chunk and mapped to document-level percentiles.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import sys
 from dataclasses import dataclass
-
-DECISION_MODEL_PATH = os.environ.get(
-    "DECISION_MODEL_PATH", os.path.expanduser("~/coding/decision-model")
-)
-DEFAULT_MODEL_DIR = os.path.join(DECISION_MODEL_PATH, "models_mlx", "v5_mlx")
-
-sys.path.insert(0, os.path.join(DECISION_MODEL_PATH, "mlx"))
 
 
 @dataclass
@@ -71,8 +66,22 @@ def _reader_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _find_salience_path(root: str) -> str | None:
+    """Whole-document model dir (models_onnx/salience_*), not the old cross-encoder."""
+    base = os.path.join(root, "models_onnx")
+    if not os.path.isdir(base):
+        return None
+    for name in sorted(os.listdir(base)):
+        if not name.startswith("salience_"):
+            continue
+        p = os.path.join(base, name, "model.int8.onnx")
+        if os.path.exists(p):
+            return p
+    return None
+
+
 class ImportanceScorer:
-    """Backends: 'batch' (batched, reader-local tower) | 'batch4bit' | 'mlx' (original)."""
+    """Backends: 'salience' | 'onnx' | 'batch' | 'batch4bit' (see module docstring)."""
 
     def __init__(
         self,
@@ -85,24 +94,48 @@ class ImportanceScorer:
             root = _reader_root()
             if os.path.isdir(os.path.join(root, "models", "v5_batched")):
                 backend = "batch"  # native Apple backend with the larger model
+            elif _find_salience_path(root):
+                backend = "salience"  # whole-document model (fast on CPU)
             elif os.path.exists(
                 os.environ.get(
                     "READER_ONNX_PATH",
                     os.path.join(root, "models_onnx", "student_salience", "model.int8.onnx"),
                 )
             ):
-                backend = "onnx"  # fresh clone / Windows path
+                backend = "onnx"
             else:
-                backend = "mlx"
+                backend = "salience"  # nothing installed yet; fail with a clear message
         self.temperature = temperature
         self.backend = backend
-        if backend == "onnx":
+        if backend == "salience":
+            from .salience_model import SalienceDocModel
+
+            default_path = _find_salience_path(_reader_root()) or os.path.join(
+                _reader_root(), "models_onnx", "salience_minilm12", "model.int8.onnx"
+            )
+            onnx_path = model_dir or os.environ.get("READER_SALIENCE_PATH", default_path)
+            if not os.path.exists(onnx_path):
+                raise FileNotFoundError(
+                    f"no salience model at {onnx_path}; run: python download_model.py"
+                )
+            self.model_dir = os.path.dirname(onnx_path)
+            self.model = SalienceDocModel(
+                onnx_path,
+                self.model_dir,
+                max_seg_tokens=int(os.environ.get("READER_SALIENCE_SEG_TOKENS", "512")),
+            )
+            self.tok = None
+        elif backend == "onnx":
             from .onnx_model import OnnxDecisionModel
 
             default_path = os.path.join(
                 _reader_root(), "models_onnx", "student_salience", "model.int8.onnx"
             )
             onnx_path = model_dir or os.environ.get("READER_ONNX_PATH", default_path)
+            if not os.path.exists(onnx_path):
+                raise FileNotFoundError(
+                    f"no cross-encoder model at {onnx_path}; run: python download_model.py --legacy"
+                )
             self.model_dir = os.path.dirname(onnx_path)
             self.model = OnnxDecisionModel(onnx_path, self.model_dir)
             self.tok = None
@@ -118,12 +151,7 @@ class ImportanceScorer:
             self.model = BatchDecisionModel(self.model_dir)
             self.tok = None
         else:
-            from decision_mlx import DecisionModelMLX  # decision-model repo
-            from transformers import AutoTokenizer
-
-            self.model_dir = model_dir or os.environ.get("READER_MODEL_DIR", DEFAULT_MODEL_DIR)
-            self.tok = AutoTokenizer.from_pretrained(self.model_dir)
-            self.model = DecisionModelMLX(self.model_dir)
+            raise ValueError(f"unknown backend {backend!r} (use salience | onnx | batch | batch4bit)")
 
     def score(
         self,
@@ -145,20 +173,27 @@ class ImportanceScorer:
         analyzed = sentences[:max_sentences] if max_sentences else sentences
         question = f"Which sentence is most important for {goal}?"
         raw: dict[int, float] = {}
-        chunk_list = _chunk(analyzed)
-        done = 0
-        for chunk in chunk_list:
-            chunk_text = " ".join(analyzed[i] for i in chunk)
-            opts = [analyzed[i] for i in chunk]
-            results = self.model.decide(
-                chunk_text, question, opts, self.tok, temperature=self.temperature
-            )
-            probs_by_text = dict(results)
-            for i in chunk:
-                raw[i] = probs_by_text[analyzed[i]]
-            done += len(chunk)
+        if self.backend == "salience":
+            logits = self.model.score_sentences(analyzed)
+            for i, v in enumerate(logits):
+                raw[i] = float(v)
             if progress is not None:
-                progress(done, len(analyzed))
+                progress(len(analyzed), len(analyzed))
+        else:
+            chunk_list = _chunk(analyzed)
+            done = 0
+            for chunk in chunk_list:
+                chunk_text = " ".join(analyzed[i] for i in chunk)
+                opts = [analyzed[i] for i in chunk]
+                results = self.model.decide(
+                    chunk_text, question, opts, self.tok, temperature=self.temperature
+                )
+                probs_by_text = dict(results)
+                for i in chunk:
+                    raw[i] = probs_by_text[analyzed[i]]
+                done += len(chunk)
+                if progress is not None:
+                    progress(done, len(analyzed))
 
         order = sorted(raw, key=lambda i: raw[i])
         ranks = {idx: r / max(len(order) - 1, 1) for r, idx in enumerate(order)}

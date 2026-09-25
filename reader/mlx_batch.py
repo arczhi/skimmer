@@ -1,12 +1,11 @@
-"""Batched decision-model inference for the reader (v5 tower, mlx-lm backend).
+"""Batched cross-encoder inference for the reader (MLX, mlx-lm backend).
 
 Scores all candidates of a chunk in ONE forward pass by batching the
 [state; question; candidate] sequences (right-padded; causal attention means
 real tokens never see the padding, and pooling is masked).
 
-The original model dir / code in decision-model is untouched: this module only
-reads models/v5_batched (prepared by prep_batched_model.py) and can also load a
-4-bit quantized sibling produced by mlx_lm.convert.
+Reads the shipped models/v5_batched_4bit directory (or a local bf16
+models/v5_batched tower) plus the shared head in models/shared/.
 """
 
 from __future__ import annotations

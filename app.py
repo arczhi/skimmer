@@ -79,7 +79,7 @@ FORM = """<!doctype html>
 </header>
 <main>
   <h1>粘贴文本，或导入文档</h1>
-  <p class="lede">模型在本地给每句话打重要性分，四档着色。关注点可以随时改：同一篇文档换一个问题，重点就会变。</p>
+  <p class="lede">{lede}</p>
   {error}
   <form class="compose" method="post" action="/score" enctype="multipart/form-data">
     <textarea name="text" spellcheck="false" placeholder="粘贴要阅读的长文本。（导入文件时此处可留空）">{text}</textarea>
@@ -88,11 +88,7 @@ FORM = """<!doctype html>
       <input id="file" type="file" name="file" accept=".pdf,.docx,.doc,.txt,.md,.markdown">
       <span class="note">支持 PDF / DOCX / DOC / TXT / Markdown，解析在本机完成</span>
     </div>
-    <div class="row">
-      <label for="goal">关注点</label>
-      <input id="goal" type="text" name="goal" value="{goal}"
-             placeholder="可留空；例如：关键数字 / 行动项 / 主要论点 / 风险">
-    </div>
+    {goal_row}
     <button type="submit">标记重点</button>
   </form>
 </main>
@@ -101,6 +97,27 @@ FORM = """<!doctype html>
 
 def render_error(msg: str) -> str:
     return f'<div class="err">{html.escape(msg)}</div>'
+
+
+def lede_text() -> str:
+    if SCORER is not None and SCORER.backend == "salience":
+        return "模型在本地给每句话打重要性分，四档着色；整篇一次编码，纯 CPU 也秒级完成。"
+    return "模型在本地给每句话打重要性分，四档着色。关注点可以随时改：同一篇文档换一个问题，重点就会变。"
+
+
+def goal_row(goal: str) -> str:
+    if SCORER is not None and SCORER.backend == "salience":
+        return (
+            '<div class="row"><label for="goal">关注点</label>'
+            '<input id="goal" type="text" value="" disabled '
+            'placeholder="当前模型按通用重要性打分">'
+            '<span class="note">整篇模型暂为通用重要性，关注点条件化在后续版本</span></div>'
+        )
+    return (
+        '<div class="row"><label for="goal">关注点</label>'
+        f'<input id="goal" type="text" name="goal" value="{html.escape(goal)}" '
+        'placeholder="可留空；例如：关键数字 / 行动项 / 主要论点 / 风险"></div>'
+    )
 
 
 def render_result(text: str, goal: str, source: str) -> str:
@@ -151,7 +168,8 @@ class Handler(BaseHTTPRequestHandler):
             checks = collect_checks(scorer=SCORER, smoke=SCORER is not None)
             self._send(checks_to_html(checks, title="环境自检"))
             return
-        self._send(FORM.format(css=PAGE_CSS, text=html.escape(default_doc()), goal="", error=""))
+        self._send(FORM.format(css=PAGE_CSS, text=html.escape(default_doc()), error="",
+                            lede=lede_text(), goal_row=goal_row("")))
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
@@ -182,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = extract_text(filename, file_bytes)
                 except DocumentError as e:
                     self._send(
-                        FORM.format(css=PAGE_CSS, text="", goal=html.escape(goal),
+                        FORM.format(css=PAGE_CSS, text="", lede=lede_text(), goal_row=goal_row(goal),
                                     error=render_error(f"文档解析失败：{e}")),
                         code=400,
                     )
@@ -196,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if not text.strip():
             self._send(
-                FORM.format(css=PAGE_CSS, text="", goal=html.escape(goal),
+                FORM.format(css=PAGE_CSS, text="", lede=lede_text(), goal_row=goal_row(goal),
                             error=render_error("请输入或导入一段文本")),
                 code=400,
             )
@@ -257,7 +275,7 @@ def main() -> None:
     ap.add_argument("--model-dir", default=None)
     args = ap.parse_args()
 
-    print("[reader] loading decision model ...", flush=True)
+    print("[reader] loading model ...", flush=True)
     SCORER = ImportanceScorer(model_dir=args.model_dir)
     print(f"[reader] backend={SCORER.backend} ready: http://127.0.0.1:{args.port}", flush=True)
     # MLX streams are thread-local -> keep the server single-threaded
