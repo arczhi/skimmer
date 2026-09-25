@@ -125,28 +125,53 @@ class ImportanceScorer:
             self.tok = AutoTokenizer.from_pretrained(self.model_dir)
             self.model = DecisionModelMLX(self.model_dir)
 
-    def score(self, text: str, goal: str = "understanding this text") -> list[SentenceScore]:
+    def score(
+        self,
+        text: str,
+        goal: str = "understanding this text",
+        progress=None,
+        max_sentences: int | None = None,
+    ) -> tuple[list[SentenceScore], int]:
+        """Score sentences. Returns (scores, n_sentences_total).
+
+        progress: optional callback(done, total) called after every chunk.
+        max_sentences: when set, only the first N sentences are analyzed; the
+        rest are returned with band -1 (plain, not analyzed).
+        """
         sentences = split_sentences(text)
+        total = len(sentences)
         if not sentences:
-            return []
+            return [], 0
+        analyzed = sentences[:max_sentences] if max_sentences else sentences
         question = f"Which sentence is most important for {goal}?"
-        raw: list[float] = [0.0] * len(sentences)
-        for chunk in _chunk(sentences):
-            chunk_text = " ".join(sentences[i] for i in chunk)
-            opts = [sentences[i] for i in chunk]
+        raw: dict[int, float] = {}
+        chunk_list = _chunk(analyzed)
+        done = 0
+        for chunk in chunk_list:
+            chunk_text = " ".join(analyzed[i] for i in chunk)
+            opts = [analyzed[i] for i in chunk]
             results = self.model.decide(
                 chunk_text, question, opts, self.tok, temperature=self.temperature
             )
             probs_by_text = dict(results)
             for i in chunk:
-                raw[i] = probs_by_text[sentences[i]]
+                raw[i] = probs_by_text[analyzed[i]]
+            done += len(chunk)
+            if progress is not None:
+                progress(done, len(analyzed))
 
-        # document-level percentile + bands
-        order = sorted(range(len(raw)), key=lambda i: raw[i])
-        ranks = {idx: r / max(len(raw) - 1, 1) for r, idx in enumerate(order)}
+        order = sorted(raw, key=lambda i: raw[i])
+        ranks = {idx: r / max(len(order) - 1, 1) for r, idx in enumerate(order)}
         out = []
         for i, s in enumerate(sentences):
-            p = ranks[i]
-            band = 3 if p >= 0.9 else 2 if p >= 0.7 else 1 if p >= 0.4 else 0
-            out.append(SentenceScore(text=s, score=raw[i], percentile=p, band=band))
-        return out
+            if i in raw:
+                p = ranks[i]
+                band = 3 if p >= 0.9 else 2 if p >= 0.7 else 1 if p >= 0.4 else 0
+            else:
+                p, band = -1.0, -1
+            out.append(SentenceScore(text=s, score=raw.get(i, 0.0), percentile=p, band=band))
+        return out, total
+
+    def max_sentences(self) -> int:
+        """Soft cap for very long documents (env: READER_MAX_SENTENCES)."""
+        return int(os.environ.get("READER_MAX_SENTENCES", "1500"))

@@ -14,12 +14,13 @@ import argparse
 import html
 import os
 import re
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 
 from reader.diagnostics import checks_to_html, collect_checks
 from reader.documents import DocumentError, extract_text
-from reader.render import PAGE_CSS, to_html
+from reader.render import PAGE_CSS, PAGE_FOOTER, page_shell, result_body
 from reader.scoring import ImportanceScorer
 
 SCORER: ImportanceScorer | None = None
@@ -104,8 +105,13 @@ def render_error(msg: str) -> str:
 
 def render_result(text: str, goal: str, source: str) -> str:
     assert SCORER is not None
-    sentences = SCORER.score(text, goal=goal or "understanding this text")
-    return to_html(sentences, title="重点标记", goal=goal, source=source)
+    sentences, total = SCORER.score(
+        text, goal=goal or "understanding this text",
+        max_sentences=SCORER.max_sentences(),
+    )
+    return page_shell("重点标记") + result_body(
+        sentences, goal=goal, source=source, analyzed=min(total, SCORER.max_sentences())
+    ) + PAGE_FOOTER
 
 
 def _parse_multipart(body: bytes, boundary: bytes) -> dict[str, bytes]:
@@ -128,6 +134,7 @@ def _parse_multipart(body: bytes, boundary: bytes) -> dict[str, bytes]:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     def _send(self, body: str, code: int = 200) -> None:
         data = body.encode("utf-8")
         self.send_response(code)
@@ -195,7 +202,49 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         source = filename or "粘贴文本"
-        self._send(render_result(text, goal, source))
+        self._stream_result(text, goal, source)
+
+    def _stream_result(self, text: str, goal: str, source: str) -> None:
+        """Score with live progress: chunked HTML, small inline scripts."""
+        assert SCORER is not None
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self._write_chunk(page_shell("重点标记"))
+        self._write_chunk(
+            '<div class="progress" id="prog">正在分句并分析，请保持页面打开</div>'
+        )
+        t0 = time.time()
+
+        def progress(done: int, total: int) -> None:
+            elapsed = time.time() - t0
+            rate = elapsed / max(done, 1)
+            remain = int(rate * (total - done))
+            self._write_chunk(
+                "<script>document.getElementById('prog').textContent="
+                f"'已分析 {done} / {total} 句，预计剩余 {remain} 秒';</script>"
+            )
+
+        sentences, total = SCORER.score(
+            text, goal=goal or "understanding this text",
+            progress=progress, max_sentences=SCORER.max_sentences(),
+        )
+        self._write_chunk("<script>document.getElementById('prog').style.display='none';</script>")
+        self._write_chunk(
+            result_body(sentences, goal=goal, source=source,
+                        analyzed=min(total, SCORER.max_sentences()))
+        )
+        self._write_chunk(PAGE_FOOTER)
+        self._write_chunk("", last=True)
+
+    def _write_chunk(self, body: str, last: bool = False) -> None:
+        if last:
+            self.wfile.write(b"0\r\n\r\n")
+        else:
+            data = body.encode("utf-8")
+            self.wfile.write(f"{len(data):X}\r\n".encode() + data + b"\r\n")
+        self.wfile.flush()
 
     def log_message(self, fmt: str, *args) -> None:  # keep the console quiet
         pass

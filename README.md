@@ -135,8 +135,14 @@ the salience data is in progress.
 
 - Context: 256 tokens for the 1.7B model, 1024 for the student. Long documents
   are chunked, so importance is judged inside a window, not globally.
-- Cost: every sentence needs one forward pass. A 100 sentence document takes
-  about 13 seconds on CPU and 2 to 3 seconds on a discrete GPU.
+- Cost: every sentence needs one forward pass, so a long document is a long
+  computation. Measured on the distilled student (ONNX, CPU): about 45 to 130 ms
+  per sentence. A 300 sentence article takes 15 to 40 seconds; a 3,000 sentence
+  report takes 2 to 6 minutes.
+- Long documents stream live progress while scoring (sentence count and ETA),
+  so the page never looks stuck. Import is capped at 1,500 analyzed sentences by
+  default; the remainder is shown uncolored and reported in the header. Set
+  `READER_MAX_SENTENCES` to change the cap (0 disables it).
 - Sentence splitting is rule based. Tables and code blocks need post-processing.
 - The student is a speed and portability trade. For maximum quality use the
   native Apple backend with the 1.7B model.
