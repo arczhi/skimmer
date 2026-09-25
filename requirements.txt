@@ -1,0 +1,14 @@
+# Core (all platforms)
+transformers
+pypdf          # PDF import
+python-docx    # DOCX import
+
+# ONNX Runtime: pick ONE variant matching the machine
+#   onnxruntime          CPU (default; works everywhere)
+#   onnxruntime-gpu      NVIDIA CUDA
+#   onnxruntime-directml any Windows GPU (AMD/Intel/NVIDIA)
+onnxruntime
+
+# Apple Silicon only (skipped on Windows/Linux via markers)
+mlx; sys_platform == "darwin"
+mlx-lm; sys_platform == "darwin"

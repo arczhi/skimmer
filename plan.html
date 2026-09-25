@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLCD 训练方案 · 面向真实阅读场景</title>
+<style>
+:root {
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --ink: #17191c;
+  --muted: #59616e;
+  --faint: #98a1ad;
+  --border: #e3e6e9;
+  --accent: #0f766e;
+  --accent-ink: #0b5d57;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 400 16px/1.75 var(--sans); -webkit-font-smoothing: antialiased; }
+header.top { display: flex; justify-content: space-between; align-items: center;
+             max-width: 820px; margin: 0 auto; padding: 22px 24px 0; }
+header.top .mark { font-weight: 600; letter-spacing: -0.01em; }
+header.top nav a { color: var(--muted); text-decoration: none; font-size: 14px; margin-left: 18px; }
+header.top nav a:hover { color: var(--accent-ink); }
+main { max-width: 820px; margin: 0 auto; padding: 26px 24px 72px; }
+h1 { font-size: clamp(1.45rem, 2.6vw, 1.85rem); letter-spacing: -0.02em;
+     line-height: 1.28; margin: 4px 0 10px; font-weight: 650; }
+h2 { font-size: 1.15rem; letter-spacing: -0.01em; margin: 34px 0 8px; font-weight: 600; }
+p, li { max-width: 68ch; }
+.lede { color: var(--muted); margin: 0 0 18px; }
+.meta { color: var(--muted); font-size: 13.5px; line-height: 1.9; }
+.meta b { color: var(--ink); font-weight: 500; }
+a { color: var(--accent-ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+@media (prefers-reduced-motion: no-preference) {
+  a, button, input { transition: color 160ms ease, background-color 160ms ease,
+                     border-color 160ms ease; }
+}
+
+  .wrap { max-width: 760px; margin: 0 auto; padding: 26px 24px 72px; }
+  h2 { font-size: 1.15rem; letter-spacing: -0.01em; margin: 34px 0 8px; font-weight: 600;
+       border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 1rem; margin: 22px 0 6px; color: var(--ink); }
+  p, li { color: var(--ink); }
+  code { background: #eef0f2; padding: 1px 5px; border-radius: 4px; font-size: 13px;
+         font-family: var(--mono); }
+  pre { background: #14171a; color: #e6e9ec; padding: 14px 16px; border-radius: 10px;
+        overflow-x: auto; font: 400 13px/1.6 var(--mono); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+  th { background: #eef0f2; font-weight: 600; }
+  .ok { color: #137333; font-weight: 600; }
+  .bad { color: #b3372c; font-weight: 600; }
+  .warn { color: #9a6510; font-weight: 600; }
+  .note { background: #eef4f8; border-left: 3px solid var(--accent);
+          padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 14px; }
+  .path { color: var(--muted); font-size: 13px; }
+  .path a { color: var(--accent-ink); }
+</style>
+</head>
+<body>
+<header class="top"><span class="mark">重点阅读器</span>
+<nav><a href="/">新建</a><a href="/status">环境自检</a></nav></header>
+
+<div class="wrap"><p class="path">2026-09-25</p>
+<h1>RLCD 训练方案：面向真实阅读场景</h1>
+<p>目标不是跑分，而是让模型在<strong>真实任务</strong>（长文划重点、工单分派、动态问题决策）上表现可靠：判断准、概率可信、覆盖用户自定义的问题与候选项。</p>
+
+<h2>1. 现状与差距</h2>
+<table>
+  <tr><th>模型</th><th>底座 / 任务数</th><th>训练方式</th><th>公平套件 acc</th></tr>
+  <tr><td>v5（当前阅读器所用）</td><td>1.7B / 24</td><td>全参 + 集成蒸馏</td><td>0.654</td></tr>
+  <tr><td>stage1</td><td>2B Qwen3.5 / 45</td><td>LoRA r=32</td><td>0.642</td></tr>
+  <tr><td>decider-2b</td><td>2B Qwen3.5 / 95</td><td>全参 + 校准 RL</td><td><strong>0.700</strong></td></tr>
+</table>
+<p>两个明确结论：</p>
+<ul>
+  <li><span class="bad">LoRA 容量不足</span>：更强底座 + 更多任务换成 LoRA 后，反而不如旧的全参模型（Biderman 2024：LoRA 学的扰动秩比全参低 10-100 倍）。</li>
+  <li><span class="warn">对齐税</span>：45 任务 SFT 后远距离未见任务（sciq / xstory / dolly）反而降了 1~10pt，需要防遗忘机制。</li>
+</ul>
+
+<h2>2. RLCD 实验已确认的成分</h2>
+<table>
+  <tr><th>组件</th><th>结论</th><th>是否纳入</th></tr>
+  <tr><td>belief proper-score（合成概率律）</td><td class="ok">有效：excess 0.0019 nats</td><td>纳入 纳入（15% 数据）</td></tr>
+  <tr><td>真实歧义 belief（GoEmotions 3 标注者分布）</td><td class="ok">有效：excess 0.030 / ECE 0.005</td><td>纳入 纳入</td></tr>
+  <tr><td>listwise CE + label smoothing</td><td class="ok">有效</td><td>纳入 纳入</td></tr>
+  <tr><td>KD 蒸馏（强教师）</td><td class="ok">有效（v5 的 NLL 1.451 为全场最佳）</td><td>待定 有了多个强变体后再做</td></tr>
+  <tr><td>action RL（REINFORCE）</td><td class="bad">零贡献（v3b 消融）</td><td>不用 不用</td></tr>
+  <tr><td>rejector 头 / 弃权训练</td><td class="bad">有害或无改善（v3/v3c）</td><td>不用 不用</td></tr>
+</table>
+<div class="note">关键判断：<strong>RLCD 的有效部分是 belief 校准，不是 RL</strong>。泛化差距要靠任务覆盖与容量解决。</div>
+
+<h2>3. Stage 2 训练方案</h2>
+
+<h3>3.1 数据（45 → ~70 任务，偏向真实用途）</h3>
+<ul>
+  <li><strong>摘要显著性（阅读器刚需）</strong>：CNN/DailyMail、multi_news，把摘要里的句子作为 gold，训练"哪些句子值得读/进入摘要"。</li>
+  <li><strong>工具 / API 选择</strong>：在已有 glaive / hermes / toolace 基础上补充真实 agent 任务。</li>
+  <li><strong>领域分类</strong>：法律（lex_glue 子集）、金融、医疗（已有 medmcqa / medqa）。</li>
+  <li><strong>保持 45 个现有任务</strong>，公平套件 8 任务严格不训练（OOD 门禁）。</li>
+</ul>
+
+<h3>3.2 训练配方</h3>
+<pre>底座:  Qwen3.5-2B 文本塔（全参微调，8-bit Adam）
+损失:  L = CE(listwise, ls=0.05)                  # 任务正确性
+         + 1.0 · belief_proper_score(15% 数据)    # 概率校准
+         + 0.1 · KL(决策分布 ‖ 基座决策分布)       # 防遗忘（对齐税）
+上下文: max_state_tokens 256 → 1024（长文与阅读器场景）
+步数:  5000，lr 1e-5，warmup 200 + cosine，grad_clip 1.0
+显存:  权重 4G + 梯度 4G + 优化器 4G + 激活 ~5G + 参考模型 4G ≈ 21G ✓</pre>
+
+<h3>3.3 评测与门禁</h3>
+<table>
+  <tr><th>评测集</th><th>指标</th><th>门禁</th></tr>
+  <tr><td>公平套件（8 任务，双方零样本）</td><td>acc / NLL / ECE</td><td>acc ≥ 0.70（不退化）</td></tr>
+  <tr><td>显著性（CNN/DM 句子级 oracle）</td><td>top-k 命中率 / 排序相关性</td><td>显著优于零样本基线</td></tr>
+  <tr><td>21 个扩展任务</td><td>acc</td><td>≥ 0.76</td></tr>
+  <tr><td>旧 held-out（banking77/massive/emotion）</td><td>acc / ECE</td><td>acc ≥ 0.58 且 ECE ≤ 0.08</td></tr>
+  <tr><td>阅读器端到端</td><td>10 篇真实文章人工评价</td><td>主观可用</td></tr>
+</table>
+
+<h2>4. 里程碑与成本</h2>
+<table>
+  <tr><th>阶段</th><th>内容</th><th>时间</th></tr>
+  <tr><td>M1 数据</td><td>新数据集探测 + 转换器 + 构建（含显著性）</td><td>~0.5 天</td></tr>
+  <tr><td>M2 冒烟</td><td>全参 + 长上下文显存/速度验证（30 步）</td><td>~1 小时</td></tr>
+  <tr><td>M3 全量</td><td>5000 步全参训练（含 KL 防遗忘）</td><td>~5.5 小时</td></tr>
+  <tr><td>M4 评测</td><td>全部套件 + 导出 MLX</td><td>~1 小时</td></tr>
+</table>
+
+<h2>5. 风险与对策</h2>
+<ul>
+  <li><strong>显存紧张</strong>（全参 2B + 1024 上下文）：batch 1 + 梯度检查点；必要时 512 上下文先行。</li>
+  <li><strong>对齐税加重</strong>（全参漂移更大）：KL 权重扫描 0.05 / 0.1 / 0.2，以公平套件为准。</li>
+  <li><strong>显著性数据噪声</strong>：用抽取式 oracle 构造标签 + 人工抽检 100 条。</li>
+  <li><strong>时间</strong>：pod 可能关机 → checkpoint 每 2000 步 + 看护脚本自动回传。</li>
+</ul>
+
+<h2>6. 长线（Stage 3+）</h2>
+<ul>
+  <li>任务扩到 95（对齐 decider 覆盖度），配比实验（任务族权重、难度归一化）。</li>
+  <li>多模态 state encoder（图文候选打分，同一 scorer 架构）。</li>
+  <li>多个强变体（全参 / 不同种子）→ 集成 → KD 融合成单模型。</li>
+</ul>
+
+</div>
+</body>
+</html>
