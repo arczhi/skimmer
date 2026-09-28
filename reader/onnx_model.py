@@ -2,7 +2,7 @@
 
 Runs the exported cross-encoder graph (input_ids + attention_mask -> logits)
 and applies attention-pooling internally, so any machine that can run
-onnxruntime can serve the reader — no Python model code, no GPU requirement.
+onnxruntime can serve the reader: no Python model code, no GPU requirement.
 
 Providers are auto-selected in this order:
     CUDA (NVIDIA) -> DirectML (any Windows GPU) -> CoreML (Apple) -> CPU
